@@ -1,0 +1,13 @@
+# Mount the backend-neutral conversation migration service.
+- insert:
+    - id: shuttle
+      name: '@deepseek-ai/dsh-shuttle'
+
+# Mount only this package's bundled migration skill.
+- insert:
+    - id: skill-filesystem-shuttle
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: 'shuttle'
+        includeDefaultRoots: false
+        bundledSkillDir: !!js process.getBuiltinModule('node:url').fileURLToPath(new URL('node_modules/@deepseek-ai/dsh-shuttle/skills', baseUrl))

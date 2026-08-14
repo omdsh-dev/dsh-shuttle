@@ -1,0 +1,4 @@
+interface:
+  display_name: "Migrate conversations"
+  short_description: "Move coding-agent conversations to or from DSH"
+  default_prompt: "Use $migrate-conversations to preview and migrate my coding-agent conversations safely."
