@@ -19,6 +19,7 @@ export function defaultSourceRoot(platform: ExternalPlatform): string | undefine
     case 'claude-code': return join(process.env['CLAUDE_CONFIG_DIR'] ?? join(homedir(), '.claude'), 'projects')
     case 'pi': return join(homedir(), '.pi', 'agent', 'sessions')
     case 'reasonix': return process.env['REASONIX_STATE_HOME'] ?? process.env['REASONIX_HOME'] ?? join(homedir(), '.reasonix')
+    case 'ahp':
     case 'opencode': return undefined
   }
 }
@@ -35,10 +36,10 @@ export async function pathExists(path: string): Promise<boolean> {
 
 function acceptedFile(platform: ExternalPlatform, path: string): boolean {
   const name = basename(path)
-  if (platform === 'opencode') return extname(name) === '.json'
+  if (platform === 'opencode' || platform === 'ahp') return extname(name) === '.json'
   if (extname(name) !== '.jsonl') return false
   if (platform === 'reasonix') {
-    return !name.endsWith('.events.jsonl') && !name.endsWith('.guardian.jsonl')
+    return !/\.(events|guardian|wire|adjudication|execution)\.jsonl$/u.test(name)
   }
   return true
 }

@@ -1,5 +1,6 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
-import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ShuttleExportRequest, ShuttleImportRequest } from '../types.ts'
 import type { ShuttleLocaleKey } from './locales.ts'
@@ -31,6 +32,7 @@ interface SessionOption {
 }
 
 const PLATFORMS: readonly { value: ShuttleImportRequest['from']; label: ShuttleLocaleKey }[] = [
+  { value: 'ahp', label: 'platformAhp' },
   { value: 'codex', label: 'platformCodex' },
   { value: 'claude-code', label: 'platformClaude' },
   { value: 'pi', label: 'platformPi' },
@@ -141,14 +143,17 @@ function Confirmation({ confirmed, pending, label, action, onConfirm, onApply, t
 }
 
 function ImportUnit({ importConversations, t }: Pick<ShuttleSettingsSectionProps, 'importConversations' | 't'>): ReactNode {
-  const [platform, setPlatform] = useState<ShuttleImportRequest['from']>('codex')
+  const [platform, setPlatform] = useState<ShuttleImportRequest['from']>('ahp')
   const [source, setSource] = useState('')
+  const [targetCwd, setTargetCwd] = useState('')
   const [limit, setLimit] = useState('')
   const limitValid = limit.trim() === '' || (Number.isSafeInteger(Number(limit)) && Number(limit) > 0)
-  const signature = JSON.stringify({ platform, source, limit })
+  const workspace = platform === 'ahp' ? targetCwd.trim() : ''
+  const signature = JSON.stringify({ platform, source, limit, workspace })
   const controller = useMigrationRun(signature, async apply => await importConversations({
     from: platform,
     ...(source.trim() === '' ? {} : { source: source.trim() }),
+    ...(workspace === '' ? {} : { targetCwd: workspace }),
     ...(limit.trim() === '' ? {} : { limit: Number(limit) }),
     ...(apply ? { apply: true } : {}),
   }), t)
@@ -177,9 +182,13 @@ function ImportUnit({ importConversations, t }: Pick<ShuttleSettingsSectionProps
             <input type="number" inputMode="numeric" min={1} step={1} value={limit} placeholder={t('limitPlaceholder')} aria-invalid={!limitValid} onChange={event => { setLimit(event.currentTarget.value) }} />
           </label>
           <label className="dsh-shuttle__field dsh-shuttle__field--wide">
-            <span>{t('source')}</span>
-            <input type="text" value={source} spellCheck={false} placeholder={t('sourcePlaceholder')} onChange={event => { setSource(event.currentTarget.value) }} />
+            <span>{t(platform === 'ahp' ? 'ahpSource' : 'source')}</span>
+            <input type="text" value={source} spellCheck={false} required={platform === 'ahp'} placeholder={t(platform === 'ahp' ? 'ahpSourcePlaceholder' : 'sourcePlaceholder')} onChange={event => { setSource(event.currentTarget.value) }} />
           </label>
+          {platform === 'ahp' ? <label className="dsh-shuttle__field dsh-shuttle__field--wide">
+            <span>{t('targetWorkspace')}</span>
+            <input type="text" value={targetCwd} spellCheck={false} onChange={event => { setTargetCwd(event.currentTarget.value) }} />
+          </label> : null}
         </div>
         {!limitValid ? <p className="dsh-shuttle__validation" role="alert">{t('invalidLimit')}</p> : null}
         <div className="dsh-shuttle__actions">
@@ -206,7 +215,7 @@ function ExportUnit({ exportConversations, sessions, current, t }: Pick<ShuttleS
   sessions: readonly SessionOption[]
   current: SessionId | undefined
 }): ReactNode {
-  const [platform, setPlatform] = useState<ShuttleExportRequest['to']>('codex')
+  const [platform, setPlatform] = useState<ShuttleExportRequest['to']>('ahp')
   const [destination, setDestination] = useState('')
   const [all, setAll] = useState(false)
   const [selectedSession, setSelectedSession] = useState<SessionId | undefined>()
@@ -283,7 +292,8 @@ function ExportUnit({ exportConversations, sessions, current, t }: Pick<ShuttleS
 
 /** First-class Settings section with independent import and export units. */
 export function ShuttleSettingsSection({ importConversations, exportConversations, t, useSessions }: ShuttleSettingsSectionProps): ReactNode {
-  const sessionState = useSessions(state => ({ ids: state.ids, byId: state.byId, current: state.current }))
+  const sessionState: SessionListState = useSessions((state: SessionListState) => state)
+  const current = sessionState.ids.find(id => (sessionState.byId[id]?.retainedBy.mainView ?? 0) > 0)
   const sessions = sessionState.ids.map(id => ({ id, title: sessionState.byId[id]?.displayTitle ?? id }))
 
   return (
@@ -294,7 +304,7 @@ export function ShuttleSettingsSection({ importConversations, exportConversation
       </header>
       <div className="dsh-shuttle__units">
         <ImportUnit importConversations={importConversations} t={t} />
-        <ExportUnit exportConversations={exportConversations} sessions={sessions} current={sessionState.current} t={t} />
+        <ExportUnit exportConversations={exportConversations} sessions={sessions} current={current} t={t} />
       </div>
     </section>
   )

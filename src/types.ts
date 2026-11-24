@@ -1,6 +1,7 @@
-/** Provider-neutral conversation model used at every migration boundary. */
+/** Legacy adapter records at the native-format boundary. */
 
-export type ExternalPlatform = 'codex' | 'claude-code' | 'pi' | 'reasonix' | 'opencode'
+export const EXTERNAL_PLATFORMS = ['ahp', 'codex', 'claude-code', 'pi', 'reasonix', 'opencode'] as const
+export type ExternalPlatform = typeof EXTERNAL_PLATFORMS[number]
 export type Platform = ExternalPlatform | 'dsh'
 export type PortableRole = 'system' | 'user' | 'assistant' | 'tool'
 
@@ -14,6 +15,10 @@ export interface PortableMessage {
   id: string
   role: PortableRole
   content: PortableBlock[]
+  turnId?: string
+  turnState?: 'complete' | 'cancelled' | 'error'
+  sourceSeq?: number
+  origin?: { namespace: string; sessionId: string; messageId: string }
   createdAt?: number
   provider?: string
   model?: string
@@ -57,6 +62,8 @@ export interface MigrationReport {
 export interface ImportOptions {
   from: ExternalPlatform
   source?: string
+  /** Override the workspace for an AHP import with a directory on this DSH host. */
+  targetCwd?: string
   apply?: boolean
   limit?: number
   signal?: AbortSignal

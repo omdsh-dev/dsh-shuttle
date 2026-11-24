@@ -11,7 +11,7 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "types": ["node", "react"],
-    "verbatimModuleSyntax": true,
+    "verbatimModuleSyntax": false,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,

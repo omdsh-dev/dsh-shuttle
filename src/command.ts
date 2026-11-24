@@ -1,20 +1,20 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { ShuttleService } from './runtime.ts'
-import type { ExternalPlatform, MigrationReport } from './types.ts'
+import { EXTERNAL_PLATFORMS, type ExternalPlatform, type MigrationReport } from './types.ts'
 
-const PLATFORMS = new Set<ExternalPlatform>(['codex', 'claude-code', 'pi', 'reasonix', 'opencode'])
+const PLATFORMS = new Set<ExternalPlatform>(EXTERNAL_PLATFORMS)
 const HELP = [
   'DSH Shuttle conversation migration:',
-  '/shuttle import <platform> [--source <path>] [--limit <n>] [--apply]',
+  '/shuttle import <platform> [--source <path-or-ahp-url>] [--cwd <ahp-target-workspace>] [--limit <n>] [--apply]',
   '/shuttle export <platform> [--destination <path>] [--session <id> ...|--all] [--apply]',
-  'Platforms: codex, claude-code, pi, reasonix, opencode.',
+  'Platforms: ahp, codex, claude-code, pi, reasonix, opencode.',
   'Without --apply, Shuttle only previews. Export defaults to the current session.',
 ].join('\n')
 
 export type ShuttleCommandRequest =
   | { action: 'help' }
-  | { action: 'import'; platform: ExternalPlatform; source?: string; limit?: number; apply: boolean }
+  | { action: 'import'; platform: ExternalPlatform; source?: string; targetCwd?: string; limit?: number; apply: boolean }
   | { action: 'export'; platform: ExternalPlatform; destination?: string; sessionIds?: string[]; all: boolean; apply: boolean }
 
 function tokenize(input: string): string[] {
@@ -82,6 +82,7 @@ export function parseShuttleInput(rawInput: string): ShuttleCommandRequest {
   if (action !== 'import' && action !== 'export') throw new Error(`unknown action "${action}"; use import or export`)
   const target = platform(tokens[1])
   let source: string | undefined
+  let targetCwd: string | undefined
   let destination: string | undefined
   let limit: number | undefined
   const sessionIds: string[] = []
@@ -96,6 +97,11 @@ export function parseShuttleInput(rawInput: string): ShuttleCommandRequest {
     }
     if (action === 'import' && token === '--source') {
       source = optionValue(tokens, index, '--source')
+      index += 1
+      continue
+    }
+    if (action === 'import' && target === 'ahp' && token === '--cwd') {
+      targetCwd = optionValue(tokens, index, '--cwd')
       index += 1
       continue
     }
@@ -125,6 +131,7 @@ export function parseShuttleInput(rawInput: string): ShuttleCommandRequest {
   if (action === 'import') return {
     action, platform: target, apply,
     ...(source !== undefined ? { source } : {}),
+    ...(targetCwd === undefined ? {} : { targetCwd }),
     ...(limit !== undefined ? { limit } : {}),
   }
   if (all && sessionIds.length > 0) throw new Error('--all cannot be combined with --session')
@@ -159,12 +166,16 @@ export async function executeShuttleCommand(
   try {
     const request = parseShuttleInput(invocation.rawInput)
     if (request.action === 'help') return { kind: 'success', text: HELP }
+    const targetCwd = request.action === 'import' && request.platform === 'ahp'
+      ? request.targetCwd ?? invocation.agent.session.header.cwd
+      : undefined
     const report = request.action === 'import'
       ? await shuttle.importConversations({
           from: request.platform,
           apply: request.apply,
           signal: invocation.signal,
           ...(request.source !== undefined ? { source: request.source } : {}),
+          ...(targetCwd === undefined ? {} : { targetCwd }),
           ...(request.limit !== undefined ? { limit: request.limit } : {}),
         })
       : await shuttle.exportConversations({

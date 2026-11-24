@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -86,7 +86,7 @@ describe('ShuttleService', () => {
       expect(duplicate.items[0]?.status).toBe('skipped')
 
       const exported = await shuttle.exportConversations({
-        to: 'pi', sessionIds: [String(header!.id)], destination: output, apply: true,
+        to: 'pi', sessionIds: [String(header!.header.id)], destination: output, apply: true,
       })
       expect(exported.items[0]?.status).toBe('written')
       const text = await readFile(exported.items[0]!.destination!, 'utf8')

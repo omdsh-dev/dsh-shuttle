@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { EXTERNAL_PLATFORMS } from './types.ts'
 import type {
   InvocationDescriptor,
   RemoteResult,
@@ -10,12 +11,13 @@ import type {
   ShuttleImportRequest,
 } from './types.ts'
 
-const platformSchema = z.enum(['codex', 'claude-code', 'pi', 'reasonix', 'opencode'])
+const platformSchema = z.enum(EXTERNAL_PLATFORMS)
 const optionalPathSchema = z.string().optional()
 
 const importRequestSchema = z.object({
   from: platformSchema,
   source: optionalPathSchema,
+  targetCwd: optionalPathSchema,
   apply: z.boolean().optional(),
   limit: z.number().int().positive().optional(),
 })
@@ -58,14 +60,14 @@ export const SHUTTLE_REMOTE_DESCRIPTORS = [
       codec: {
         mode: 'strict',
         typeSymbol: '@deepseek-ai/dsh-shuttle#ShuttleImportRequest',
-        schema: importRequestSchema,
+        create: () => importRequestSchema,
       },
     }],
     cancellation: { parameter: 'signal' },
     result: {
       mode: 'strict',
       typeSymbol: '@deepseek-ai/dsh-shuttle#MigrationReport',
-      schema: migrationReportSchema,
+      create: () => migrationReportSchema,
     },
   },
   {
@@ -81,14 +83,14 @@ export const SHUTTLE_REMOTE_DESCRIPTORS = [
       codec: {
         mode: 'strict',
         typeSymbol: '@deepseek-ai/dsh-shuttle#ShuttleExportRequest',
-        schema: exportRequestSchema,
+        create: () => exportRequestSchema,
       },
     }],
     cancellation: { parameter: 'signal' },
     result: {
       mode: 'strict',
       typeSymbol: '@deepseek-ai/dsh-shuttle#MigrationReport',
-      schema: migrationReportSchema,
+      create: () => migrationReportSchema,
     },
   },
 ] as const satisfies readonly InvocationDescriptor[]

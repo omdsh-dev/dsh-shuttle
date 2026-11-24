@@ -8,6 +8,7 @@ import type {
   PortableMessage,
 } from './types.ts'
 import { safeSegment } from './io.ts'
+import { parseAhp, serializeAhp } from './ahp.ts'
 
 type JsonRecord = Record<string, unknown>
 
@@ -70,17 +71,6 @@ function lines(text: string): JsonRecord[] {
   return output
 }
 
-function dedupeAdjacent(messages: readonly PortableMessage[]): PortableMessage[] {
-  const output: PortableMessage[] = []
-  let prior: string | undefined
-  for (const item of messages) {
-    const signature = JSON.stringify([item.role, item.content])
-    if (signature !== prior) output.push(item)
-    prior = signature
-  }
-  return output
-}
-
 function blockText(blocks: readonly PortableBlock[]): string {
   return blocks.flatMap(block => {
     if (block.type === 'text' || block.type === 'reasoning') return [block.text]
@@ -103,11 +93,12 @@ function textBlocks(value: unknown): PortableBlock[] {
     const type = string(part['type'])
     const text = string(part['text']) ?? string(part['content'])
     if (type === 'thinking' || type === 'reasoning' || type === 'analysis' || type === 'summary_text') {
-      if (text !== undefined) result.push({ type: 'reasoning', text })
+      const thinking = string(part['thinking']) ?? text
+      if (thinking !== undefined) result.push({ type: 'reasoning', text: thinking })
     } else if (type === 'tool_use' || type === 'tool-call' || type === 'toolCall') {
       result.push({
         type: 'tool-call',
-        id: string(part['id']) ?? string(part['toolCallId']) ?? `call-${randomUUID()}`,
+        id: string(part['id']) ?? string(part['toolCallId']) ?? '',
         name: string(part['name']) ?? string(part['toolName']) ?? 'unknown',
         arguments: jsonString(part['input'] ?? part['arguments'] ?? part['args']),
       })
@@ -115,7 +106,7 @@ function textBlocks(value: unknown): PortableBlock[] {
       result.push({
         type: 'tool-result',
         toolCallId: string(part['tool_use_id']) ?? string(part['toolCallId']) ?? 'unknown',
-        content: typeof part['content'] === 'string' ? part['content'] : jsonString(part['content']),
+        content: toolOutputText(part['content']),
         ...(part['is_error'] === true || part['isError'] === true ? { isError: true } : {}),
       })
     } else if (text !== undefined) {
@@ -125,13 +116,21 @@ function textBlocks(value: unknown): PortableBlock[] {
   return result
 }
 
+function toolOutputText(value: unknown): string {
+  if (Array.isArray(value)) {
+    const text = blockText(textBlocks(value))
+    if (text !== '' || value.length === 0) return text
+  }
+  return jsonString(value)
+}
+
 function message(
   role: PortableMessage['role'],
   content: PortableBlock[],
   input: { id?: string | undefined; createdAt?: number | undefined; provider?: string | undefined; model?: string | undefined } = {},
 ): PortableMessage {
   return {
-    id: input.id ?? randomUUID(),
+    id: input.id ?? '',
     role,
     content,
     ...(input.createdAt !== undefined ? { createdAt: input.createdAt } : {}),
@@ -156,7 +155,12 @@ function conversation(input: {
     id: input.id ?? safeSegment(input.path === undefined ? randomUUID() : basename(input.path).replace(/\.jsonl?$/u, '')),
     source: input.source,
     createdAt,
-    messages: input.messages,
+    messages: input.messages.map((item, ordinal) => ({
+      ...item,
+      id: item.id || `message-${ordinal}`,
+      content: item.content.map((block, index) => block.type === 'tool-call' && block.id === ''
+        ? { ...block, id: `call-${ordinal}-${index}` } : block),
+    })),
     ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
@@ -178,11 +182,24 @@ function codexParse(text: string, context: ParseContext = {}): PortableConversat
   let cwd: string | undefined
   let createdAt = now
   const messages: PortableMessage[] = []
+  let lastText: { source: 'event' | 'response'; mirrorMatched: boolean } | undefined
+  const appendText = (item: PortableMessage, source: 'event' | 'response') => {
+    const prior = messages.at(-1)
+    if (lastText !== undefined && !lastText.mirrorMatched && lastText.source !== source
+      && prior?.role === item.role && JSON.stringify(prior.content) === JSON.stringify(item.content)) {
+      if (source === 'response') messages[messages.length - 1] = item
+      lastText.mirrorMatched = true
+      return
+    }
+    messages.push(item)
+    lastText = { source, mirrorMatched: false }
+  }
   for (const row of rows) {
     const payload = record(row['payload']) ?? row
     const outerType = string(row['type'])
     const type = string(payload['type']) ?? outerType
     const time = timestamp(row['timestamp'] ?? payload['timestamp'], now)
+    const nativeId = string(payload['id'])
     if (outerType === 'session_meta' || type === 'session_meta') {
       id = string(payload['id']) ?? id
       cwd = string(payload['cwd']) ?? cwd
@@ -193,37 +210,44 @@ function codexParse(text: string, context: ParseContext = {}): PortableConversat
       if (type === 'message') {
         const role = string(payload['role'])
         if (role === 'user' || role === 'assistant' || role === 'system') {
-          messages.push(message(role, textBlocks(payload['content']), { createdAt: time }))
+          appendText(message(role, textBlocks(payload['content']), { id: nativeId, createdAt: time }), 'response')
         }
-      } else if (type === 'function_call' || type === 'custom_tool_call') {
+      } else if (type === 'function_call' || type === 'custom_tool_call' || type === 'mcp_tool_call') {
+        lastText = undefined
         messages.push(message('assistant', [{
           type: 'tool-call',
-          id: string(payload['call_id']) ?? string(payload['id']) ?? `call-${randomUUID()}`,
+          id: string(payload['call_id']) ?? string(payload['id']) ?? '',
           name: string(payload['name']) ?? 'unknown',
           arguments: jsonString(payload['arguments'] ?? payload['input']),
-        }], { createdAt: time }))
-      } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
+        }], { id: nativeId, createdAt: time }))
+      } else if (type === 'function_call_output' || type === 'custom_tool_call_output' || type === 'mcp_tool_call_output') {
+        lastText = undefined
+        const callId = string(payload['call_id'])
+        if (callId === undefined) continue
+        const output = record(payload['output'])
         messages.push(message('tool', [{
           type: 'tool-result',
-          toolCallId: string(payload['call_id']) ?? 'unknown',
-          content: jsonString(payload['output']),
-        }], { createdAt: time }))
+          toolCallId: callId,
+          content: toolOutputText(output?.['content'] ?? payload['output']),
+          ...(payload['success'] === false || output?.['isError'] === true ? { isError: true } : {}),
+        }], { id: nativeId, createdAt: time }))
       } else if (type === 'reasoning') {
         const content = textBlocks(payload['summary'] ?? payload['content']).map(block =>
           block.type === 'text' ? { type: 'reasoning' as const, text: block.text } : block)
-        if (content.length > 0) messages.push(message('assistant', content, { createdAt: time }))
+        if (content.length > 0) appendText(message('assistant', content, { id: nativeId, createdAt: time }), 'response')
       }
     } else if (outerType === 'event_msg') {
+      if (type === 'task_started' || type === 'task_complete' || type === 'turn_aborted') lastText = undefined
       if (type === 'user_message' || type === 'agent_message' || type === 'agent_reasoning') {
         const role = type === 'user_message' ? 'user' : 'assistant'
         const body = string(payload['message']) ?? string(payload['text'])
-        if (body !== undefined) messages.push(message(role, [{
+        if (body !== undefined) appendText(message(role, [{
           type: type === 'agent_reasoning' ? 'reasoning' : 'text', text: body,
-        }], { createdAt: time }))
+        }], { id: nativeId, createdAt: time }), 'event')
       }
     }
   }
-  return [conversation({ id, source: 'codex', path: context.path, cwd, createdAt, messages: dedupeAdjacent(messages) })]
+  return [conversation({ id, source: 'codex', path: context.path, cwd, createdAt, messages })]
 }
 
 function codexSerialize(value: PortableConversation): string {
@@ -281,13 +305,18 @@ function claudeParse(text: string, context: ParseContext = {}): PortableConversa
     if (role === 'user' || role === 'assistant' || role === 'system') {
       const blocks = textBlocks(source['content'])
       const ordinary = blocks.filter(block => block.type !== 'tool-result')
+      const results = blocks.filter(block => block.type === 'tool-result')
+      const uuid = string(row['uuid'])
+      if (role === 'user' && results.length > 0) {
+        messages.push(message('tool', results, { id: uuid === undefined || ordinary.length === 0 ? uuid : uuid + ':tools', createdAt: time }))
+      }
       if (ordinary.length > 0) messages.push(message(role, ordinary, {
-        id: string(row['uuid']), createdAt: time,
+        id: uuid, createdAt: time,
         provider: role === 'assistant' ? 'anthropic' : undefined,
         model: string(source['model']),
       }))
-      for (const block of blocks) {
-        if (block.type === 'tool-result') messages.push(message('tool', [block], { createdAt: time }))
+      if (role !== 'user' && results.length > 0) {
+        messages.push(message('tool', results, { id: uuid === undefined || ordinary.length === 0 ? uuid : uuid + ':tools', createdAt: time }))
       }
     }
   }
@@ -327,28 +356,51 @@ function claudeSerialize(value: PortableConversation): string {
   return jsonl(rows)
 }
 
+/** Pi reopens a persisted tree at its last written entry. Follow its parents. */
+function piBranch(entries: JsonRecord[]): JsonRecord[] {
+  const leaf = entries.at(-1)
+  if (leaf === undefined || !('parentId' in leaf)) return entries
+  const byId = new Map<string, JsonRecord>()
+  for (const entry of entries) {
+    const id = string(entry['id'])
+    if (id !== undefined) byId.set(id, entry)
+  }
+  const branch: JsonRecord[] = []
+  const seen = new Set<JsonRecord>()
+  let entry: JsonRecord | undefined = leaf
+  while (entry !== undefined) {
+    if (seen.has(entry)) throw new Error('Pi session contains a cycle in its parent chain')
+    seen.add(entry)
+    branch.push(entry)
+    const parent = string(entry['parentId'])
+    entry = parent === undefined ? undefined : byId.get(parent)
+  }
+  return branch.reverse()
+}
+
 function piParse(text: string, context: ParseContext = {}): PortableConversation[] {
   const rows = lines(text)
   const header = rows.find(row => row['type'] === 'session')
   const now = context.now ?? Date.now()
   const messages: PortableMessage[] = []
-  for (const row of rows) {
+  for (const row of piBranch(rows.filter(item => item['type'] !== 'session'))) {
     if (row['type'] !== 'message') continue
     const source = record(row['message'])
     if (source === undefined) continue
     const role = string(source['role'])
     if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'toolResult') continue
     const blocks = textBlocks(source['content'])
+    const createdAt = timestamp(source['timestamp'] ?? row['timestamp'], now)
     if (role === 'toolResult') {
       messages.push(message('tool', [{
         type: 'tool-result',
         toolCallId: string(source['toolCallId']) ?? 'unknown',
         content: blockText(blocks),
         ...(source['isError'] === true ? { isError: true } : {}),
-      }], { id: string(row['id']), createdAt: timestamp(row['timestamp'], now) }))
+      }], { id: string(row['id']), createdAt }))
     } else {
       messages.push(message(role, blocks, {
-        id: string(row['id']), createdAt: timestamp(row['timestamp'], now),
+        id: string(row['id']), createdAt,
         provider: string(source['provider']), model: string(source['model']),
       }))
     }
@@ -412,7 +464,7 @@ function reasonixParse(text: string, context: ParseContext = {}): PortableConver
       const fn = record(call?.['function'])
       if (call === undefined) continue
       blocks.push({
-        type: 'tool-call', id: string(call['id']) ?? `call-${randomUUID()}`,
+        type: 'tool-call', id: string(call['id']) ?? '',
         name: string(fn?.['name']) ?? string(call['name']) ?? 'unknown',
         arguments: jsonString(fn?.['arguments'] ?? call['arguments']),
       })
@@ -420,6 +472,7 @@ function reasonixParse(text: string, context: ParseContext = {}): PortableConver
     if (role === 'tool') {
       messages.push(message('tool', [{
         type: 'tool-result', toolCallId: string(row['tool_call_id']) ?? 'unknown', content: body ?? '',
+        ...(row['isError'] === true || row['is_error'] === true ? { isError: true } : {}),
       }], { id: string(row['id']), createdAt: time }))
     } else {
       messages.push(message(role, blocks, { id: string(row['id']), createdAt: time }))
@@ -448,19 +501,111 @@ function reasonixSerialize(value: PortableConversation): string {
   return jsonl(rows)
 }
 
+function opencodeV2Parse(rows: readonly unknown[], info: JsonRecord | undefined, context: ParseContext): PortableConversation {
+  const now = context.now ?? Date.now()
+  const messages: PortableMessage[] = []
+  let turn: PortableMessage[] = []
+  let last: JsonRecord | undefined
+  let unsettledTool = false
+
+  const finish = (superseded = false) => {
+    const input = turn[0]
+    const waiting = last?.['finish'] === 'tool-calls'
+    if (input !== undefined && number(record(last?.['time'])?.['completed']) !== undefined
+      && !unsettledTool && (!waiting || superseded)) {
+      input.turnState = last?.['finish'] === 'error' || last?.['error'] !== undefined ? 'error'
+        : waiting ? 'cancelled' : 'complete'
+      messages.push(...turn)
+    }
+    turn = []
+    last = undefined
+    unsettledTool = false
+  }
+
+  for (const value of rows) {
+    const row = record(value)
+    if (row === undefined) continue
+    const id = string(row['id'])
+    const createdAt = timestamp(record(row['time'])?.['created'], now)
+    if (row['type'] === 'user' || row['type'] === 'synthetic') {
+      finish(true)
+      turn.push(message(row['type'] === 'user' ? 'user' : 'system', [
+        { type: 'text', text: string(row['text']) ?? '' },
+      ], { id, createdAt }))
+      continue
+    }
+    if (row['type'] !== 'assistant' || turn.length === 0 || !Array.isArray(row['content'])) continue
+
+    last = row
+    unsettledTool = false
+    const blocks: PortableBlock[] = []
+    const results: PortableBlock[] = []
+    for (const partValue of row['content']) {
+      const part = record(partValue)
+      if (part === undefined) continue
+      const type = part['type']
+      if ((type === 'text' || type === 'reasoning') && typeof part['text'] === 'string') {
+        blocks.push({ type, text: part['text'] })
+        continue
+      }
+      if (type !== 'tool') continue
+      const state = record(part['state'])
+      const failed = state?.['status'] === 'error'
+      if (state === undefined || (!failed && state['status'] !== 'completed')) {
+        unsettledTool = true
+        continue
+      }
+      const callId = string(part['id'])
+      if (callId === undefined) continue
+      const outputs = Array.isArray(state['content']) ? state['content'].flatMap(value => {
+        const item = record(value)
+        return item?.['type'] === 'text' && typeof item['text'] === 'string' ? [item['text']] : []
+      }) : []
+      const error = string(record(state['error'])?.['message'])
+      if (failed && error !== undefined && !outputs.includes(error)) outputs.push(error)
+      blocks.push({ type: 'tool-call', id: callId, name: string(part['name']) ?? 'unknown',
+        arguments: jsonString(state['input']) })
+      results.push({ type: 'tool-result', toolCallId: callId, content: outputs.join('\n'),
+        ...(failed ? { isError: true } : {}) })
+    }
+
+    const model = record(row['model'])
+    turn.push(message('assistant', blocks, {
+      id, createdAt, provider: string(model?.['providerID']), model: string(model?.['id']),
+    }))
+    if (results.length > 0) turn.push(message('tool', results, {
+      id: id === undefined ? undefined : id + ':tools', createdAt,
+    }))
+  }
+  finish()
+
+  return conversation({
+    id: string(info?.['id']), source: 'opencode', path: context.path,
+    cwd: string(record(info?.['location'])?.['directory']), title: string(info?.['title']),
+    createdAt: timestamp(record(info?.['time'])?.['created'], now), messages,
+  })
+}
+
 function opencodeParse(text: string, context: ParseContext = {}): PortableConversation[] {
   const root = record(JSON.parse(text))
   if (root === undefined || !Array.isArray(root['messages'])) throw new Error('invalid OpenCode export: expected { info, messages }')
   const info = record(root['info'])
+  if (root['messages'].some(value => {
+    const type = record(value)?.['type']
+    return type === 'user' || type === 'synthetic' || type === 'assistant'
+  })) return [opencodeV2Parse(root['messages'], info, context)]
   const now = context.now ?? Date.now()
   const messages: PortableMessage[] = []
+  const callIds = new Set<string>()
   for (const entryValue of root['messages']) {
     const entry = record(entryValue)
     const msg = record(entry?.['info'])
     if (entry === undefined || msg === undefined || !Array.isArray(entry['parts'])) continue
     const role = string(msg['role'])
     if (role !== 'user' && role !== 'assistant') continue
+    if (role === 'user' && entry['parts'].some(value => record(value)?.['type'] !== 'tool')) callIds.clear()
     const blocks: PortableBlock[] = []
+    const results: PortableBlock[] = []
     for (const partValue of entry['parts']) {
       const part = record(partValue)
       if (part === undefined) continue
@@ -472,18 +617,29 @@ function opencodeParse(text: string, context: ParseContext = {}): PortableConver
         const callId = string(part['callID']) ?? string(part['id']) ?? 'unknown'
         const name = string(part['tool']) ?? 'unknown'
         if (state?.['status'] === 'completed' || state?.['status'] === 'error') {
-          blocks.push({ type: 'tool-result', toolCallId: callId,
+          if (!callIds.has(callId)) {
+            blocks.push({ type: 'tool-call', id: callId, name, arguments: jsonString(state['input']) })
+            callIds.add(callId)
+          }
+          results.push({ type: 'tool-result', toolCallId: callId,
             content: string(state['output']) ?? string(state['error']) ?? '',
             ...(state['status'] === 'error' ? { isError: true } : {}) })
         } else {
           blocks.push({ type: 'tool-call', id: callId, name, arguments: jsonString(state?.['input']) })
+          callIds.add(callId)
         }
       }
     }
     const timeRecord = record(msg['time'])
-    messages.push(message(role, blocks, {
-      id: string(msg['id']), createdAt: timestamp(timeRecord?.['created'], now),
-      provider: string(msg['providerID']), model: string(msg['modelID']),
+    const id = string(msg['id'])
+    const createdAt = timestamp(timeRecord?.['created'], now)
+    if (blocks.length !== 0 || results.length === 0) {
+      messages.push(message(role === 'user' && blocks.some(block => block.type === 'tool-call') ? 'assistant' : role, blocks, {
+        id, createdAt, provider: string(msg['providerID']), model: string(msg['modelID']),
+      }))
+    }
+    if (results.length !== 0) messages.push(message('tool', results, {
+      id: id === undefined || blocks.length === 0 ? id : id + ':tools', createdAt,
     }))
   }
   const time = record(info?.['time'])
@@ -558,6 +714,10 @@ const datedDestination = (root: string, value: PortableConversation): string => 
 }
 
 export const adapters: Record<ExternalPlatform, ExternalAdapter> = {
+  ahp: {
+    platform: 'ahp', parse: parseAhp, serialize: serializeAhp,
+    destination: (root, value) => join(root, `${safeSegment(value.id)}.ahp.json`),
+  },
   codex: { platform: 'codex', parse: codexParse, serialize: codexSerialize, destination: datedDestination },
   'claude-code': {
     platform: 'claude-code', parse: claudeParse, serialize: claudeSerialize,

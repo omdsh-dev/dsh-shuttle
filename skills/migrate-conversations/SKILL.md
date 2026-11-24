@@ -1,6 +1,6 @@
 ---
 name: migrate-conversations
-description: Safely preview and migrate coding-agent conversation history between DeepSeek Harness (DSH) and Codex, Claude Code, Pi, Reasonix, or OpenCode. Use when a user wants to import, export, move, copy, back up, or convert agent transcripts involving DSH.
+description: Safely preview and migrate coding-agent conversation history between DeepSeek Harness (DSH) and a Microsoft AHP host, Codex, Claude Code, Pi, Reasonix, or OpenCode. Use when a user wants to import, export, move, copy, back up, or convert agent transcripts involving DSH.
 ---
 
 # Migrate Conversations
@@ -14,8 +14,8 @@ command service is unavailable.
 
 ## Workflow
 
-1. Identify the direction, platform, source or destination path, and optional
-   DSH session IDs. Supported values are `codex`, `claude-code`, `pi`,
+1. Identify the direction, platform, source endpoint or path, destination path, and optional
+   DSH session IDs. Supported values include `ahp`, `codex`, `claude-code`, `pi`,
    `reasonix`, and `opencode`.
 2. Run the command without `--apply`. Present planned, skipped, and failed
    counts plus every warning.
@@ -31,7 +31,7 @@ command service is unavailable.
 Import to DSH:
 
 ```bash
-dsh-shuttle import --from <platform> [--source <path>] [--dsh-root <path>]
+dsh-shuttle import --from <platform> [--source <path-or-ahp-url>] [--dsh-root <path>]
 dsh-shuttle import --from <platform> [same options] --apply
 ```
 
@@ -49,7 +49,13 @@ the configured limit.
 
 - Codex, Claude Code, Pi, and Reasonix can use their conventional default roots.
   Prefer explicit paths when multiple installations or profiles exist.
-- OpenCode import requires JSON created by `opencode export <id>`.
+- AHP can import an explicit host URL or a snapshot JSON file. Use `wss://` for
+  a remote host. Use `--cwd` to select a local workspace for the import. AHP export writes snapshots, or use
+  `dsh-shuttle serve-ahp --session <id>` to expose selected history through a
+  loopback-only, read-only AHP endpoint. `dsh-shuttle serve-ahp --from <platform> --source <path>`
+  exposes native history without importing it into DSH first. The endpoint reads the source at startup
+  and serves turn pages when requested.
+- OpenCode import reads JSON from `opencode session export <id>` in OpenCode V2 or `opencode export <id>` in OpenCode 1.x.
 - DSH-to-OpenCode produces official interchange JSON. Run
   `opencode import <file>` afterward; never edit `opencode.db`.
 - After writing Reasonix JSONL, suggest `reasonix sessions reindex` only if the
